@@ -1,3 +1,4 @@
+import copy
 from io import BytesIO
 import json
 import shutil
@@ -335,12 +336,82 @@ rule add_inclines:
                 json.dump(sw, f)
 
 
-rule collect:
+rule node:
     input:
         ['interim/inclined/sidewalks.geojson',
          'interim/lengthed/crossings.geojson',
          'interim/inclined/footways.geojson',
-         'interim/extracted/stairs.geojson',
+         'interim/extracted/stairs.geojson']
+    output:
+        expand('interim/noded/{layer}.geojson',
+               layer=['sidewalks', 'crossings', 'footways', 'stairs'])
+    run:
+        geojsons = []
+        for in_path in input:
+            with open(in_path) as f:
+                geojsons.append(json.load(f))
+
+        # Given a set of geojsons, split when they fairly-perfectly share nodes. Fairly
+        # = sub-cm precision. This would be better to do in 'OSM' space first using node
+        # IDs, this is a hack to get a release out.
+
+        def get_node_id(coordinate):
+            return ','.join([str(round(c, 9)) for c in coordinate])
+
+        # Store nodes as rounded lon-lat strings. Keep the 'degree', i.e. number of times
+        # it is referenced
+        degrees = {}
+
+        for geojson in geojsons:
+            for feature in geojson['features']:
+                for coordinate in feature['geometry']['coordinates']:
+                    node_id = get_node_id(coordinate)
+                    if node_id in degrees:
+                        degrees[node_id] += 1
+                    else:
+                        degrees[node_id] = 1
+
+        # Now that we have all of the degrees, we can split up each geometry into new
+        # features. Note that no attributes are updated.
+        new_geojsons = []
+        for geojson in geojsons:
+            new_geojson = {'type': 'FeatureCollection', 'features': []}
+            for feature in geojson['features']:
+                split_at_indices = []
+                coordinates = feature['geometry']['coordinates']
+                for i, coordinate in enumerate(coordinates):
+                    node_id = get_node_id(coordinate)
+                    degree = degrees[node_id]
+                    if i != 0 and i != (len(coordinates) - 1):
+                        if degree > 1:
+                            split_at_indices.append(i)
+                if split_at_indices:
+                    last = 0
+                    split_at_indices.append(len(coordinates) - 1)
+                    for index in split_at_indices:
+                        new_coords = coordinates[last:index + 1]
+                        new_feature = copy.deepcopy(feature)
+                        new_feature['geometry']['coordinates'] = new_coords
+                        new_geojson['features'].append(new_feature)
+                        last = index
+                else:
+                    new_geojson['features'].append(feature)
+            new_geojsons.append(new_geojson)
+
+        for out_path, new_geojson in zip(output, new_geojsons):
+            with open(out_path, 'w') as f:
+                json.dump(new_geojson, f)
+
+
+
+
+
+rule collect:
+    input:
+        ['interim/noded/sidewalks.geojson',
+         'interim/noded/crossings.geojson',
+         'interim/noded/footways.geojson',
+         'interim/noded/stairs.geojson',
          'interim/extracted/kerbs.geojson',
          'interim/extracted/elevators.geojson']
     output:
@@ -348,8 +419,7 @@ rule collect:
                layer=['sidewalks', 'crossings', 'footways', 'stairs', 'kerbs', 'elevators'])
     run:
         for in_path, out_path in zip(input, output):
-            shell('mv {inpath} {outpath}'.format(inpath=in_path, outpath=out_path))
-
+            shell('cp {inpath} {outpath}'.format(inpath=in_path, outpath=out_path))
 
 def extract_nodes(path, matches, keep=None, nonmatches=None):
     if keep is None:

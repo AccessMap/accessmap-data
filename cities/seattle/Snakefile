@@ -322,7 +322,14 @@ rule add_inclines:
                         y = nearest.y + dy
                         ele = interpolate(x, y)
 
-                    way['properties']['incline'] = ele / way['properties']['length']
+                    eles.append(ele)
+
+                incline = (eles[1] - eles[0]) / way['properties']['length']
+                incline = int(1000 * incline)
+                if incline > 999:
+                    incline = 999
+
+                way['properties']['incline'] = incline
 
             with open(out_path, 'w') as f:
                 json.dump(sw, f)

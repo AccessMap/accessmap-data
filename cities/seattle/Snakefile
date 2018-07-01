@@ -72,7 +72,7 @@ rule extract_stairs:
     run:
         match_tags = {'highway': 'steps'}
 
-        fc = extract_ways(input[0], match_tags, keep_tags)
+        fc = extract_ways(input[0], match_tags)
 
         with open(output[0], 'w') as f:
             json.dump(fc, f)
@@ -84,14 +84,21 @@ rule extract_footways:
     output:
         'interim/extracted/footways.geojson'
     run:
-        match_tags = {'highway': 'footway'}
-        nonmatch_tags = {'footway': 'crossing', 'footway': 'sidewalk'}
-        keep_tags = ['surface']
+        fw_match_tags = {'highway': 'footway'}
+        fw_nonmatch_tags = {'footway': 'crossing', 'footway': 'sidewalk'}
+        fw_keep_tags = ['surface']
 
-        fc = extract_ways(input[0], match_tags, keep_tags)
+        fyes_match_tags = {'foot': 'yes'}
+        fyes_nonmatch_tags = {'highway': 'footway'}
+        fyes_keep_tags = ['surface']
+
+        fws = extract_ways(input[0], fw_match_tags, fw_keep_tags, nonmatches=fw_nonmatch_tags)
+        fyes = extract_ways(input[0], fyes_match_tags, fyes_keep_tags, nonmatches=fyes_nonmatch_tags)
+
+        fws['features'] += fyes['features']
 
         with open(output[0], 'w') as f:
-            json.dump(fc, f)
+            json.dump(fws, f)
 
 
 rule extract_streets:
@@ -120,9 +127,8 @@ rule extract_kerbs:
     output:
         'interim/extracted/kerbs.geojson'
     run:
-        match_tags = {'highway': 'footway'}
-        nonmatch_tags = {'footway': 'crossing', 'footway': 'sidewalk'}
-        keep_tags = ['surface']
+        match_tags = {'kerb': 'raised', 'kerb': 'lowered'}
+        keep_tags = ['kerb', 'tactile_paving']
 
         fc = extract_nodes(input[0], match_tags, keep_tags)
 
@@ -136,9 +142,8 @@ rule extract_elevators:
     output:
         'interim/extracted/elevators.geojson'
     run:
-        match_tags = {'highway': 'footway'}
-        nonmatch_tags = {'footway': 'crossing', 'footway': 'sidewalk'}
-        keep_tags = ['surface']
+        match_tags = {'elevator': 'yes'}
+        keep_tags = ['opening_hours']
 
         fc = extract_nodes(input[0], match_tags, keep_tags)
 
@@ -256,7 +261,7 @@ rule add_inclines:
     input:
         ['interim/dem/elevations.geojson',
          'interim/lengthed/sidewalks.geojson',
-         'interim/lengthed/sidewalks.geojson']
+         'interim/lengthed/footways.geojson']
     output:
         ['interim/inclined/sidewalks.geojson',
          'interim/inclined/footways.geojson']
@@ -328,11 +333,12 @@ rule collect:
         ['interim/inclined/sidewalks.geojson',
          'interim/lengthed/crossings.geojson',
          'interim/inclined/footways.geojson',
+         'interim/extracted/stairs.geojson',
          'interim/extracted/kerbs.geojson',
          'interim/extracted/elevators.geojson']
     output:
         expand('output/{layer}.geojson',
-               layer=['sidewalks', 'crossings', 'footways', 'kerbs', 'elevators'])
+               layer=['sidewalks', 'crossings', 'footways', 'stairs', 'kerbs', 'elevators'])
     run:
         for in_path, out_path in zip(input, output):
             shell('mv {inpath} {outpath}'.format(inpath=in_path, outpath=out_path))

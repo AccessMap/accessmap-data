@@ -299,7 +299,7 @@ rule add_inclines:
 
             for way in sw['features']:
                 start_lonlat = way['geometry']['coordinates'][0]
-                end_lonlat = way['geometry']['coordinates'][1]
+                end_lonlat = way['geometry']['coordinates'][-1]
 
                 eles = []
                 for point in [start_lonlat, end_lonlat]:

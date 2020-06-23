@@ -67,6 +67,8 @@ def interpolated_value(x, y, dem, method='bilinear', scaling_factor=1.0):
 
     # Get the in-DEM index coordinates
     _x, _y = inv * (x, y)
+    _x = abs(_x)
+    _y = abs(_y)
 
     # Extract a window of coordinates
     if method == 'bilinear':

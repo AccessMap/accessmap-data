@@ -1,0 +1,586 @@
+import copy
+import json
+
+import networkx as nx
+from osmread import parse_file, Node, Way
+import pyproj
+import rasterio as rio
+import scipy
+from shapely.geometry import LinearRing, MultiPoint, Point
+
+sys.path.append("../../src")
+import data_helpers as dh
+
+
+rule all:
+    input:
+        ["output/transportation.geojson",
+         "output/barriers.geojson"]
+
+rule osmosis:
+    input:
+        "data_sources/extract.pbf"
+    output:
+        ["interim/osmosis/transportation.osm",
+         "interim/osmosis/barriers.osm",
+         "interim/osmosis/streets.osm"]
+    shell: "./extract.sh {input} interim/osmosis/"
+
+
+rule extract_transportation:
+    input:
+        "interim/osmosis/transportation.osm"
+    output:
+        "interim/extracted/transportation.geojson"
+    run:
+        # Properties (k:v pairs) to keep from OSM data
+        keep = [
+            "bridge",
+            "crossing",
+            "foot",
+            "footway",
+            "ford",
+            "highway",
+            "indoor",
+            "layer",
+            "service",
+            "subclass",
+            "surface",
+            "tunnel"
+        ]
+        ways_to_geojson(input[0], output[0], keep=keep)
+
+
+rule extract_barriers:
+    input:
+        "interim/osmosis/barriers.osm"
+    output:
+        "interim/extracted/barriers.geojson"
+    run:
+        nodes_to_geojson(input[0], output[0], keep=["kerb", "tactile_paving"])
+
+
+rule extract_streets:
+    input:
+        "interim/osmosis/streets.osm"
+    output:
+        "interim/extracted/streets.geojson"
+    run:
+        ways_to_geojson(input[0], output[0])
+
+
+rule standardize_transportation:
+    input:
+        "interim/extracted/transportation.geojson"
+    output:
+        "interim/standardized/transportation.geojson"
+    run:
+        with open(input[0]) as f:
+            layer = json.load(f)
+
+        transforms = [{
+            "key": "crossing",
+            "to_value": "marked",
+            "from_values": [
+                "uncontrolled",
+                "zebra"
+            ]
+        }, {
+           "key": "foot",
+           "to_value": 1,
+           "from_values": [
+               "yes"
+           ]
+        }, {
+           "key": "foot",
+           "to_value": 0,
+           "from_values": [
+               "no"
+           ]
+        }, {
+            "key": "indoor",
+            "to_value": 1,
+            "from_values": [
+                "yes"
+            ]
+        }]
+
+        tag_whitelist = {
+            "crossing": [
+                "marked",
+                "unmarked"
+            ],
+            "footway": [
+                "sidewalk",
+                "crossing"
+            ],
+            "surface": [
+                "asphalt",
+                "concrete",
+                "gravel",
+                "grass",
+                "paved",
+                "paving_stones",
+                "unpaved"
+            ],
+            "layer": [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5],
+            "service": [
+                "alley",
+                "crossover",
+                "driveway",
+                "parking_aisle",
+                "siding",
+                "spur",
+                "yard"
+            ]
+        }
+
+        subclasses = [
+            "cycleway",
+            "footway",
+            "path",
+            "pedestrian",
+            "service",
+            "steps"
+        ]
+
+        for feature in layer["features"]:
+            properties = feature["properties"]
+            new_properties = {}
+
+            # Do transforms on tag/attribute values
+            for transform in transforms:
+                key = transform["key"]
+                if key in properties:
+                    # NOTE: this is not super efficent. Room for optimization!
+                    if (properties[key] == transform["to_value"]) or \
+                       (properties[key] in transform["from_values"]):
+                        new_properties[key] = transform["to_value"]
+                        break
+
+            # Keep only whitelist properties
+            for key, allowed_tags in tag_whitelist.items():
+                if key in properties:
+                    if properties[key] in allowed_tags:
+                        new_properties[key] = properties[key]
+
+            # Special case: brunnel
+            if "bridge" in properties:
+                new_properties["brunnel"] = "bridge"
+            elif "tunnel" in properties:
+                new_properties["brunnel"] = "tunnel"
+            elif "ford" in properties:
+                new_properties["brunnel"] = "ford"
+
+            # Special case: subclass
+            if "highway" in properties:
+                if properties["highway"] in subclasses:
+                    new_properties["subclass"] = properties["highway"]
+
+            # Update feature with new properties
+            feature["properties"] = new_properties
+
+        with open(output[0], "w") as f:
+            json.dump(layer, f)
+
+
+rule standardize_barriers:
+    input:
+        "interim/extracted/barriers.geojson"
+    output:
+        "interim/standardized/barriers.geojson"
+    run:
+        with open(input[0]) as f:
+            layer = json.load(f)
+
+        transforms = [{
+            "key": "tactile_paving",
+            "to_value": 1,
+            "from_values": ["yes"]
+        }, {
+            "key": "tactile_paving",
+            "to_value": 0,
+            "from_values": ["no"]
+        }]
+
+        tag_whitelist = {
+            "kerb": [
+                "flush",
+                "lowered",
+                "raised",
+                "rolled"
+            ]
+        }
+        for feature in layer["features"]:
+            properties = feature["properties"]
+            new_properties = {}
+
+            # Do transforms on tag/attribute values
+            for transform in transforms:
+                key = transform["key"]
+                if key in properties:
+                    # NOTE: this is not super efficent. Room for optimization!
+                    if (properties[key] == transform["to_value"]) or \
+                       (properties[key] in transform["from_values"]):
+                        new_properties[key] = transform["to_value"]
+                        break
+
+            # Keep only whitelist properties
+            for key, allowed_tags in tag_whitelist.items():
+                if key in properties:
+                    if properties[key] in allowed_tags:
+                        new_properties[key] = properties[key]
+
+            # Update feature with new properties
+            feature["properties"] = new_properties
+
+        with open(output[0], "w") as f:
+            json.dump(layer, f)
+
+
+rule edgify:
+    input:
+        "interim/standardized/transportation.geojson"
+    output:
+        "interim/edgified/transportation.geojson"
+    run:
+        with open(input[0]) as f:
+            geojson = json.load(f)
+
+        # Given a set of geojsons, split when they fairly-perfectly share nodes. Fairly
+        # = sub-cm precision. This would be better to do in "OSM" space first using node
+        # IDs, this is a hack to get a release out.
+
+        def get_node_id(coordinate):
+            return ",".join([str(round(c, 9)) for c in coordinate])
+
+        # Store nodes as rounded lon-lat strings. Keep the "degree", i.e. number of times
+        # it is referenced
+        degrees = {}
+
+        for feature in geojson["features"]:
+            for coordinate in feature["geometry"]["coordinates"]:
+                node_id = get_node_id(coordinate)
+                if node_id in degrees:
+                    degrees[node_id] += 1
+                else:
+                    degrees[node_id] = 1
+
+        # Now that we have all of the degrees, we can split up each geometry into new
+        # features. Note that no attributes are updated.
+        new_geojson = {"type": "FeatureCollection", "features": []}
+        for feature in geojson["features"]:
+            split_at_indices = []
+            coordinates = feature["geometry"]["coordinates"]
+            for i, coordinate in enumerate(coordinates):
+                node_id = get_node_id(coordinate)
+                degree = degrees[node_id]
+                if i != 0 and i != (len(coordinates) - 1):
+                    if degree > 1:
+                        split_at_indices.append(i)
+            if split_at_indices:
+                last = 0
+                split_at_indices.append(len(coordinates) - 1)
+                for index in split_at_indices:
+                    new_coords = coordinates[last:index + 1]
+                    new_feature = copy.deepcopy(feature)
+                    new_feature["geometry"]["coordinates"] = new_coords
+                    new_geojson["features"].append(new_feature)
+                    last = index
+            else:
+                new_geojson["features"].append(feature)
+
+        with open(output[0], "w") as f:
+            json.dump(new_geojson, f)
+
+
+rule add_curbramps_to_crossings:
+    input:
+        ["interim/edgified/transportation.geojson",
+         "interim/standardized/barriers.geojson"]
+    output:
+        "interim/curbramped/transportation.geojson"
+    run:
+        with open(input[0]) as f:
+            tr = json.load(f)
+
+        with open(input[1]) as g:
+            ba = json.load(g)
+
+        G = nx.MultiDiGraph()
+
+        # Create a graph with crossings as edges and nodes annotted with kerb info
+        for i, feature in enumerate(tr["features"]):
+            properties = feature["properties"]
+            if "footway" in properties and properties["footway"] == "crossing":
+                coords = feature["geometry"]["coordinates"]
+                u = ",".join([str(round(c, 7)) for c in coords[0]])
+                v = ",".join([str(round(c, 7)) for c in coords[-1]])
+                G.add_edges_from([(u, v, {**properties, **{"i": i}})])
+
+        has_raised = []
+        for feature in ba["features"]:
+            properties = feature["properties"]
+            if "kerb" in properties and properties["kerb"] == "raised":
+                lon, lat = feature["geometry"]["coordinates"]
+                node = "{},{}".format(round(lon, 7), round(lat, 7))
+                if node in G:
+                    pred = G.predecessors(node)
+                    succ = G.successors(node)
+                    for p in pred:
+                        edges = G[p][node]
+                        for key, data in edges.items():
+                            has_raised.append(data["i"])
+                    for s in succ:
+                        edges = G[node][s]
+                        for key, data in edges.items():
+                            has_raised.append(data["i"])
+
+        for i, feature in enumerate(tr["features"]):
+            properties = feature["properties"]
+            if "footway" in properties and properties["footway"] == "crossing":
+                if i in has_raised:
+                    properties["curbramps"] = 0
+                else:
+                    properties["curbramps"] = 1
+
+        with open(output[0], "w") as h:
+            json.dump(tr, h)
+
+
+rule add_lengths:
+    input:
+        "interim/curbramped/transportation.geojson"
+    output:
+        "interim/lengthed/transportation.geojson"
+    run:
+        with open(input[0]) as f:
+            layer = json.load(f)
+        for feature in layer["features"]:
+            length = dh.haversine(feature["geometry"]["coordinates"])
+            feature["properties"]["length"] = round(length, 1)
+        with open(output[0], "w") as f:
+            json.dump(layer, f)
+
+
+rule intersection_elevations:
+    input:
+        ["interim/osmosis/streets.osm", "data_sources/dem.tif"]
+    output:
+        ["interim/dem/elevations.geojson"]
+    run:
+        dem = rio.open(input[1])
+
+        # Find important graph nodes: street endpoints that shared by > 2 ways *or*
+        # unshared (dead ends)
+
+        nodes = {}
+        node_count = {}
+        for entity in parse_file(input[0]):
+            if isinstance(entity, Node):
+                nodes[entity.id] = entity
+
+            if not isinstance(entity, Way):
+                continue
+
+            for node in entity.nodes:
+                if node in node_count:
+                    node_count[node] += 1
+                else:
+                    node_count[node] = 0
+
+        wgs84 = pyproj.Proj(init="epsg:4326")
+        demproj = pyproj.Proj(**dem.crs)
+
+        # Extract points of interest and project to same CRS as DEM
+        points = []
+        for node_id, node in nodes.items():
+            if node_id in node_count:
+                if node_count[node_id] > 2 or node_count[node_id] == 1:
+                    coords = pyproj.transform(wgs84, demproj, node.lon, node.lat)
+                    elevation = dh.raster_interp.interpolated_value(*coords, dem)
+                    points.append({
+                        "type": "Feature",
+                        "geometry": {"type": "Point", "coordinates": [node.lon, node.lat]},
+                        "properties": {"elevation": round(elevation, 1)},
+                    })
+
+        fc = {"type": "FeatureCollection", "features": points}
+        with open(output[0], "w") as f:
+            json.dump(fc, f)
+
+
+rule add_inclines:
+    input:
+        ["interim/dem/elevations.geojson",
+         "interim/lengthed/transportation.geojson"]
+    output:
+        "interim/inclined/transportation.geojson"
+    run:
+        with open(input[0]) as f:
+            el = json.load(f)
+        # Project to UTM
+        wgs84 = pyproj.Proj(init="epsg:4326")
+        utm = pyproj.Proj(init="epsg:26910")
+
+        # Create interpolator
+        xs = []
+        ys = []
+        zs = []
+
+        for point in el["features"]:
+            coords = point["geometry"]["coordinates"]
+            x, y = pyproj.transform(wgs84, utm, coords[0], coords[1])
+            xs.append(x)
+            ys.append(y)
+            zs.append(point["properties"]["elevation"])
+            point["geometry"]["coordinates"] = [x, y]
+
+        # Start interpolating elevations, calculate incline
+        xys = list(zip(xs, ys))
+        convex_hull = LinearRing(MultiPoint(xys).convex_hull.exterior.coords)
+
+        interpolate = scipy.interpolate.LinearNDInterpolator(xys, zs, fill_value=-1000)
+
+        # Extract inclines
+        def needs_incline(feature):
+            if "footway" in feature["properties"]:
+                if feature["properties"]["footway"] == "sidewalk":
+                    return True
+            return False
+
+        with open(input[1]) as f:
+            fc = json.load(f)
+
+        for feature in fc["features"]:
+            if not needs_incline(feature):
+                continue
+
+            if feature["properties"]["length"] < 3:
+                feature["properties"]["incline"] = 0.0
+                continue
+
+            start_lonlat = feature["geometry"]["coordinates"][0]
+            end_lonlat = feature["geometry"]["coordinates"][-1]
+
+            eles = []
+            for point in [start_lonlat, end_lonlat]:
+                in_utm = pyproj.transform(wgs84, utm, point[0], point[1])
+                ele = interpolate(*in_utm)
+
+                if ele == -1000:
+                    # Failed to interpolate - use convex hull as representative
+                    # elevation
+                    pt = Point(in_utm)
+                    nearest = convex_hull.interpolate(convex_hull.project(pt))
+
+                    # Give it a 1-meter nudge "inwards" so we"re guaranteed to get an
+                    # interpolate result
+                    dx = nearest.x - pt.x
+                    dy = nearest.y - pt.y
+                    dist = (dx**2 + dy**2)**.5
+                    dx = 1 * dx / dist
+                    dy = 1 * dy / dist
+                    x = nearest.x + dx
+                    y = nearest.y + dy
+                    ele = interpolate(x, y)
+
+                eles.append(ele)
+
+            incline = (eles[1] - eles[0]) / feature["properties"]["length"]
+            incline = round(incline, 3)
+            if incline > 1:
+                incline = 1.0
+
+            feature["properties"]["incline"] = incline
+
+        with open(output[0], "w") as f:
+            json.dump(fc, f)
+
+
+rule collect:
+    input:
+        ["interim/inclined/transportation.geojson",
+         "interim/standardized/barriers.geojson"]
+    output:
+        ["output/transportation.geojson",
+         "output/barriers.geojson"]
+    run:
+        for in_path, out_path in zip(input, output):
+            shell("cp {inpath} {outpath}".format(inpath=in_path, outpath=out_path))
+
+
+def nodes_to_geojson(path_in, path_out, keep=None):
+    if keep is None:
+        keep = []
+
+    fc = {"type": "FeatureCollection", "features": []}
+    for entity in parse_file(path_in):
+        if not isinstance(entity, Node):
+            continue
+
+        tags = entity.tags
+
+        # Assemble a GeoJSON feature
+        feature = {
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [entity.lon, entity.lat]},
+            "properties": {},
+        }
+
+        for key in keep:
+            if key in tags:
+                feature["properties"][key] = tags[key]
+
+        fc["features"].append(feature)
+
+    with open(path_out, "w") as f:
+        json.dump(fc, f)
+
+
+def ways_to_geojson(path_in, path_out, keep=None):
+    if keep is None:
+        keep = []
+
+    nodes = {}
+    fc = {"type": "FeatureCollection", "features": []}
+    for entity in parse_file(path_in):
+        if isinstance(entity, Node):
+            nodes[entity.id] = entity
+
+        if not isinstance(entity, Way):
+            continue
+
+        tags = entity.tags
+
+        # Assemble a GeoJSON feature
+        feature = {
+            "type": "Feature",
+            "geometry": {"type": "LineString", "coordinates": []},
+            "properties": {},
+        }
+        coords = [[nodes[n].lon, nodes[n].lat] for n in entity.nodes]
+        feature["geometry"]["coordinates"] = coords
+
+        for key in keep:
+            if key in tags:
+                feature["properties"][key] = tags[key]
+
+        fc["features"].append(feature)
+
+    with open(path_out, "w") as f:
+        json.dump(fc, f)
+
+
+# NOTE: Would be faster to create conditional tree and only apply
+# transfomrations to appropriate semantic features
+def transform_values(properties, tag, from_values, to_value):
+    if tag in properties:
+        if properties[tag] in from_values:
+            # Update with standardized tag
+            properties[tag] = to_value
+
+def standardize_values(properties, tag, allowed_values):
+    if tag in properties:
+        if properties[tag] not in allowed_values:
+            properties.pop(tag)

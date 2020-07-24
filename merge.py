@@ -5,6 +5,14 @@ from shapely.geometry import MultiPoint, mapping
 
 
 CITY_DATA = [{
+    "name": "Microsoft Campus",
+    "key": "wa.microsoft",
+    "center": [-122.1387, 47.6429, 13],
+    "transportation_data": "./cities/microsoft/output/transportation.geojson"
+}]
+
+"""
+[{
     "name": "Seattle",
     "key": "wa.seattle",
     "center": [-122.339, 47.604, 15],
@@ -20,6 +28,7 @@ CITY_DATA = [{
     "center": [-122.478, 48.751, 13.5],
     "transportation_data": "./cities/bellingham/output/transportation.geojson"
 }]
+"""
 
 
 def merge_geojson(datasets):

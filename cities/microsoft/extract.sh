@@ -2,10 +2,10 @@ inputfile=$1
 outputdir=$2
 osmosis --read-pbf $inputfile \
         --bounding-box \
-          left=-122.1429 \
-          bottom=47.6577 \
-          right=-122.1363 \
-          top=47.6606 \
+          left=-122.1432 \
+          bottom=47.6365 \
+          right=-122.1321 \
+          top=47.6497 \
           clipIncompleteEntities=true \
           outPipe.0=source \
 \
@@ -25,6 +25,7 @@ osmosis --read-pbf $inputfile \
         --write-xml $outputdir/streets.osm \
 \
         --tf inPipe.0=barriers_in \
-          accept-nodes kerb=* \
-        --un \
+          accept-nodes kerb=* amenity=* tactile_paving=* traffic_signals=* traffic_sign=* barrier=* highway=* man_made=* \
+        --tf reject-ways \
+        --tf reject-relations \
         --write-xml $outputdir/barriers.osm \

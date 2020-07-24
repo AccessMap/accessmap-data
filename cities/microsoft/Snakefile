@@ -57,7 +57,17 @@ rule extract_barriers:
     output:
         "interim/extracted/barriers.geojson"
     run:
-        nodes_to_geojson(input[0], output[0], keep=["kerb", "tactile_paving"])
+        keep = [
+            "amenity",
+            "kerb",
+            "tactile_paving",
+            "traffic_signals",
+            "traffic_sign",
+            "barrier",
+            "highway",
+            "man_made"
+        ]
+        nodes_to_geojson(input[0], output[0], keep=keep)
 
 
 rule extract_streets:
@@ -209,6 +219,24 @@ rule standardize_barriers:
                 "lowered",
                 "raised",
                 "rolled"
+            ],
+            "traffic_signals": [
+                "request_button",
+                "pedestrian_crossing"
+            ],
+            "barrier": [
+                "bollard"
+            ],
+            "amenity": [
+                "bench",
+                "waste_basket"
+            ],
+            "highway": [
+                "street_lamp",
+                "stop"
+            ],
+            "man_made": [
+                "manhole"
             ]
         }
         for feature in layer["features"]:
@@ -233,7 +261,14 @@ rule standardize_barriers:
 
             # Update feature with new properties
             feature["properties"] = new_properties
+        
+        nonempty_points = []
+        for feature in layer["features"]:
+            if feature["properties"]:
+                nonempty_points.append(feature)
 
+        print(nonempty_points)
+        layer["features"] = nonempty_points
         with open(output[0], "w") as f:
             json.dump(layer, f)
 
@@ -293,7 +328,6 @@ rule edgify:
         with open(output[0], "w") as f:
             json.dump(new_geojson, f)
 
-
 rule add_curbramps_to_crossings:
     input:
         ["interim/edgified/transportation.geojson",
@@ -344,6 +378,32 @@ rule add_curbramps_to_crossings:
                 else:
                     properties["curbramps"] = 1
 
+        has_tactile = []
+        for feature in ba["features"]:
+            properties = feature["properties"]
+            if "tactile_paving" in properties and properties["tactile_paving"] == 1:
+                lon, lat = feature["geometry"]["coordinates"]
+                node = "{},{}".format(round(lon, 7), round(lat, 7))
+                if node in G:
+                    pred = G.predecessors(node)
+                    succ = G.successors(node)
+                    for p in pred:
+                        edges = G[p][node]
+                        for key, data in edges.items():
+                            has_tactile.append(data["i"])
+                    for s in succ:
+                        edges = G[node][s]
+                        for key, data in edges.items():
+                            has_tactile.append(data["i"])
+
+        for i, feature in enumerate(tr["features"]):
+            properties = feature["properties"]
+            if "footway" in properties and properties["footway"] == "crossing":
+                if i in has_tactile:
+                    properties["tactile_paving"] = 1
+                else:
+                    properties["tactile_paving"] = 0
+
         with open(output[0], "w") as h:
             json.dump(tr, h)
 
@@ -363,7 +423,7 @@ rule add_lengths:
             json.dump(layer, f)
 
 
-rule intersection_elevations:
+""" rule intersection_elevations:
     input:
         ["interim/osmosis/streets.osm", "data_sources/dem.tif"]
     output:
@@ -408,19 +468,19 @@ rule intersection_elevations:
         fc = {"type": "FeatureCollection", "features": points}
         with open(output[0], "w") as f:
             json.dump(fc, f)
-
+"""
 
 rule add_inclines:
     input:
-        ["interim/dem/elevations.geojson",
-         "interim/lengthed/transportation.geojson"]
+        # "interim/dem/elevations.geojson",
+        "interim/lengthed/transportation.geojson"
     output:
         "interim/inclined/transportation.geojson"
     run:
         with open(input[0]) as f:
             el = json.load(f)
         # Project to UTM
-        wgs84 = pyproj.Proj(init="epsg:4326")
+        """ wgs84 = pyproj.Proj(init="epsg:4326")
         utm = pyproj.Proj(init="epsg:26910")
 
         # Create interpolator
@@ -441,15 +501,24 @@ rule add_inclines:
         convex_hull = LinearRing(MultiPoint(xys).convex_hull.exterior.coords)
 
         interpolate = scipy.interpolate.LinearNDInterpolator(xys, zs, fill_value=-1000)
-
+        """
         # Extract inclines
         def needs_incline(feature):
             if "footway" in feature["properties"]:
                 if feature["properties"]["footway"] == "sidewalk":
                     return True
-            return False
+            if feature["properties"]["subclass"] == "service":
+                return True
+            elif feature["properties"]["subclass"] == "pedestrian":
+                return True
+            elif feature["properties"]["subclass"] == "footway":
+                return True
+            elif feature["properties"]["subclass"] == "path":
+                return True
+            else:
+                return False
 
-        with open(input[1]) as f:
+        with open(input[0]) as f:
             fc = json.load(f)
 
         for feature in fc["features"]:
@@ -460,7 +529,7 @@ rule add_inclines:
                 feature["properties"]["incline"] = 0.0
                 continue
 
-            start_lonlat = feature["geometry"]["coordinates"][0]
+            """ start_lonlat = feature["geometry"]["coordinates"][0]
             end_lonlat = feature["geometry"]["coordinates"][-1]
 
             eles = []
@@ -490,9 +559,9 @@ rule add_inclines:
             incline = (eles[1] - eles[0]) / feature["properties"]["length"]
             incline = round(incline, 3)
             if incline > 1:
-                incline = 1.0
+                incline = 1.0 """
 
-            feature["properties"]["incline"] = incline
+            feature["properties"]["incline"] = 0.0
 
         with open(output[0], "w") as f:
             json.dump(fc, f)

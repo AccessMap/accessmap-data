@@ -41,12 +41,19 @@ rule extract_transportation:
             "footway",
             "ford",
             "highway",
-            "indoor",
+            # "indoor",
             "layer",
             "service",
             "subclass",
             "surface",
-            "tunnel"
+            "tunnel",
+            "handrail", 
+            "step_count",
+            "button_operated", 
+            "lit", 
+            "traffic_signals", 
+            "traffic_signals:sound", 
+            "crossing:island"
         ]
         ways_to_geojson(input[0], output[0], keep=keep)
 
@@ -116,10 +123,6 @@ rule standardize_transportation:
         }]
 
         tag_whitelist = {
-            "crossing": [
-                "marked",
-                "unmarked"
-            ],
             "footway": [
                 "sidewalk",
                 "crossing"
@@ -151,8 +154,16 @@ rule standardize_transportation:
             "path",
             "pedestrian",
             "service",
-            "steps"
         ]
+
+        """ keep_steps = ["handrail", "step_count"]
+        keep_crossings = [
+            "button_operated", 
+            "lit", 
+            "traffic_signals", 
+            "traffic_signals:sound", 
+            "crossing:island"
+        ] """
 
         for feature in layer["features"]:
             properties = feature["properties"]
@@ -186,6 +197,13 @@ rule standardize_transportation:
             if "highway" in properties:
                 if properties["highway"] in subclasses:
                     new_properties["subclass"] = properties["highway"]
+
+            if "crossing" in properties:
+                new_properties = properties
+            
+            if "highway" in properties:
+                if properties["highway"] == "steps":
+                    new_properties = properties
 
             # Update feature with new properties
             feature["properties"] = new_properties
@@ -507,14 +525,15 @@ rule add_inclines:
             if "footway" in feature["properties"]:
                 if feature["properties"]["footway"] == "sidewalk":
                     return True
-            if feature["properties"]["subclass"] == "service":
-                return True
-            elif feature["properties"]["subclass"] == "pedestrian":
-                return True
-            elif feature["properties"]["subclass"] == "footway":
-                return True
-            elif feature["properties"]["subclass"] == "path":
-                return True
+            elif "subclass" in feature["properties"]:
+                if feature["properties"]["subclass"] == "service":
+                    return True
+                elif feature["properties"]["subclass"] == "pedestrian":
+                    return True
+                elif feature["properties"]["subclass"] == "footway":
+                    return True
+                elif feature["properties"]["subclass"] == "path":
+                    return True
             else:
                 return False
 

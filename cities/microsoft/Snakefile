@@ -1,6 +1,7 @@
 import copy
 import json
 
+import geopandas
 import networkx as nx
 from osmread import parse_file, Node, Way
 import pyproj
@@ -154,16 +155,17 @@ rule standardize_transportation:
             "path",
             "pedestrian",
             "service",
+            "steps"
         ]
 
-        """ keep_steps = ["handrail", "step_count"]
+        keep_steps = ["handrail", "step_count"]
         keep_crossings = [
-            "button_operated", 
-            "lit", 
-            "traffic_signals", 
-            "traffic_signals:sound", 
-            "crossing:island"
-        ] """
+            ("button_operated", "button_operated"),
+            ("lit", "lit"),
+            ("traffic_signals", "traffic_signals"), 
+            ("traffic_signals:sound", "traffic_signals_sound"), 
+            ("crossing:island", "crossing_island")
+        ]
 
         for feature in layer["features"]:
             properties = feature["properties"]
@@ -198,12 +200,18 @@ rule standardize_transportation:
                 if properties["highway"] in subclasses:
                     new_properties["subclass"] = properties["highway"]
 
+            # Special case: crossing
             if "crossing" in properties:
-                new_properties = properties
+                for crossing_property_orig, crossing_property_new in keep_crossings:
+                    if crossing_property_orig in properties:
+                        new_properties[crossing_property_new] = properties[crossing_property_orig]
             
+            # Special case: steps
             if "highway" in properties:
                 if properties["highway"] == "steps":
-                    new_properties = properties
+                    for step_property in keep_steps:
+                        if step_property in properties:
+                            new_properties[step_property] = properties[step_property]
 
             # Update feature with new properties
             feature["properties"] = new_properties
@@ -285,7 +293,6 @@ rule standardize_barriers:
             if feature["properties"]:
                 nonempty_points.append(feature)
 
-        print(nonempty_points)
         layer["features"] = nonempty_points
         with open(output[0], "w") as f:
             json.dump(layer, f)
@@ -361,7 +368,7 @@ rule add_curbramps_to_crossings:
 
         G = nx.MultiDiGraph()
 
-        # Create a graph with crossings as edges and nodes annotted with kerb info
+        # Create a graph with crossings as edges and nodes annotated with kerb info
         for i, feature in enumerate(tr["features"]):
             properties = feature["properties"]
             if "footway" in properties and properties["footway"] == "crossing":
@@ -434,9 +441,22 @@ rule add_lengths:
     run:
         with open(input[0]) as f:
             layer = json.load(f)
+        
         for feature in layer["features"]:
             length = dh.haversine(feature["geometry"]["coordinates"])
             feature["properties"]["length"] = round(length, 1)
+        
+        to_delete = []
+        for i, feature in enumerate(layer["features"]):
+            if feature["properties"]["length"] == 0:
+                to_delete.append(i)
+        
+        for j, ind in enumerate(to_delete):
+            to_delete[j] = ind - j
+        
+        for updated_ind in to_delete:
+            del layer["features"][updated_ind]
+
         with open(output[0], "w") as f:
             json.dump(layer, f)
 
@@ -585,10 +605,81 @@ rule add_inclines:
         with open(output[0], "w") as f:
             json.dump(fc, f)
 
+rule landmark_intersections:
+    input:
+        ["interim/inclined/transportation.geojson",
+         "interim/standardized/barriers.geojson"]
+    output:
+        "interim/landmarked/transportation.geojson"
+    run:
+        trans = geopandas.read_file(input[0])
+        bar = geopandas.read_file(input[1])
+
+        bar_si = bar.sindex
+        trans_len = len(trans.index)
+        lin_ref_list = [[] for _ in range(trans_len)]
+        count_list = [0 for _ in range(trans_len)]
+
+        for index, _ in trans.iterrows():
+            line_geometry = trans.loc[index]['geometry']
+            tuple_bounds = line_geometry.bounds
+            candidate_points_idx = list(bar_si.intersection(tuple_bounds))
+            candidate_points = bar.loc[candidate_points_idx]
+            buffered_line = line_geometry.buffer(0.00003)
+            if len(candidate_points_idx) > 0:
+                real_points_count = 0
+                for p_index in candidate_points_idx:
+                    point_geometry = bar.loc[p_index]['geometry']
+                    if buffered_line.intersects(point_geometry):
+                        real_points_count += 1
+                        norm_dist = line_geometry.project(point_geometry, normalized=True)
+                        point_type = "unknown"
+                        for col_idx, value in bar.loc[p_index].iteritems():
+                            if col_idx == "geometry":
+                                break
+                            if value:
+                                point_type = value
+                        lin_ref_list[index].append((point_type, norm_dist))
+                count_list[index] = real_points_count
+
+        lin_ref_strings = []
+        for l in lin_ref_list:
+            if l:
+                lin_ref_strings.append(str(l))
+            else:
+                lin_ref_strings.append("NO_LANDMARKS")
+
+        trans["lin_ref_list"] = lin_ref_strings
+        trans["count_sum"] = count_list
+
+        trans.to_file(output[0], driver='GeoJSON')
+
+rule clean_trans:
+    input:
+        "interim/landmarked/transportation.geojson"
+    output:
+        "interim/clean/transportation.geojson"
+    run:
+        with open(input[0]) as f:
+            data = json.load(f)
+
+        for feature in data['features']:
+            new_properties = {}
+            for p in feature['properties']:
+                content = feature['properties'][p]
+                if p in ['incline', 'count_sum']:
+                    new_properties[p] = content
+                else: 
+                    if content:
+                        new_properties[p] = content
+            feature['properties'] = new_properties
+
+        with open(output[0], 'w') as f:
+            json.dump(data, f)
 
 rule collect:
     input:
-        ["interim/inclined/transportation.geojson",
+        ["interim/clean/transportation.geojson",
          "interim/standardized/barriers.geojson"]
     output:
         ["output/transportation.geojson",

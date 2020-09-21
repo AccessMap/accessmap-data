@@ -1,3 +1,7 @@
+# archived
+
+Moved to https://github.com/OpenSidewalks/opensidewalks-data
+
 # accessmap-seattle-data
 
 ## Installation
